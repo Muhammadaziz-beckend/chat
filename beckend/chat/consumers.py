@@ -1,6 +1,5 @@
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
-from asgiref.sync import async_to_sync
 from django.utils import timezone
 
 
@@ -9,36 +8,57 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.user = self.scope["user"]
         self.id = self.scope["url_route"]["kwargs"]["course_id"]
         self.room_group_name = f"chat_{self.id}"
-        # присоединиться к группе чат-комнаты
-        await async_to_sync(self.channel_layer.group_add)(
-            self.room_group_name, self.channel_name
-        )
-        # принять соединение
-        await self.accept()
+
+        # Проверка авторизации пользователя
+        if self.user.is_authenticated:
+            # Присоединиться к группе чат-комнаты
+            await self.channel_layer.group_add(
+                self.room_group_name, self.channel_name
+            )
+            # Принять соединение
+            await self.accept()
+        else:
+            # Отклонить соединение, если пользователь не авторизован
+            await self.close()
 
     async def disconnect(self, close_code):
-        # покинуть группу чат-комнаты
-        await async_to_sync(self.channel_layer.group_discard)(
-            self.room_group_name, self.channel_name
-        )
+        # Покинуть группу чат-комнаты
+        if self.user.is_authenticated:
+            await self.channel_layer.group_discard(
+                self.room_group_name, self.channel_name
+            )
 
-    # получить сообщение из группы чат-комнаты
+    # Получить сообщение из группы чат-комнаты
     async def chat_message(self, event):
-        # отправить сообщение в веб-сокет
+        # Отправить сообщение в веб-сокет
         await self.send(text_data=json.dumps(event))
 
     async def receive(self, text_data):
-        text_data_json = json.loads(text_data)
-        print(text_data_json)
-        message = text_data_json["message"]
+        # Загрузить данные из сообщения
+        try:
+            text_data_json = json.loads(text_data)
+            message = text_data_json["message"]
+        except (json.JSONDecodeError, KeyError):
+            # Обработать ошибку, если формат неверный
+            await self.send(text_data=json.dumps({"error": "Invalid message format"}))
+            return
+
         now = timezone.now()
 
-        await async_to_sync(self.channel_layer.group_send)(
-            self.room_group_name,
-            {
-                "type": "chat_message",
-                "message": message,
-                "user": self.user.username,
-                "datetime": now.isoformat(),
-            },
-        )
+        # Проверка авторизации пользователя
+        if self.user.is_authenticated:
+            # Отправить сообщение в группу чат-комнаты
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {
+                    "type": "chat_message",
+                    "message": message,
+                    "user": self.user.username,
+                    "datetime": now.isoformat(),
+                },
+            )
+        else:
+            # Сообщение об ошибке для неавторизованных пользователей
+            await self.send(
+                text_data=json.dumps({"error": "You must be logged in to send messages"})
+            )
